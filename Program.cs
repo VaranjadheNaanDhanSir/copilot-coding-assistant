@@ -5,12 +5,15 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 using CopilotCodingAssistant.Models;
+using CopilotCodingAssistant.Configuration;
 
 
-const string CopilotUrl = "https://m365.cloud.microsoft/chat";
-const string RequiredAccount = "adityasj26@iitk.ac.in";
-const string RequiredModelMenuText = "GPT 5.6 Think deeper";
-const string ProfileFolderName = "CopilotWebsiteAutomation";
+var settings = AppSettings.Load();
+
+var CopilotUrl = settings.CopilotUrl;
+var RequiredAccount = settings.AccountEmail;
+var RequiredModelMenuText = settings.PreferredModel;
+var ProfileFolderName = settings.ProfileFolderName;
 
 var profilePath = Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
