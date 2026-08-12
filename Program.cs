@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
+using CopilotCodingAssistant.Models;
+
 
 const string CopilotUrl = "https://m365.cloud.microsoft/chat";
 const string RequiredAccount = "adityasj26@iitk.ac.in";
@@ -946,10 +948,3 @@ void PrintHelp()
     Console.WriteLine("  dotnet run -- inspect-headed");
 }
 
-public sealed record CodeBlock(string Language, string Code);
-
-public sealed record CopilotResult(
-    string Model,
-    string FullText,
-    List<CodeBlock> CodeBlocks,
-    DateTime CapturedAtUtc);
