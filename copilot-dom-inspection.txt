@@ -1,0 +1,18 @@
+﻿Browser contexts: 1
+
+CONTEXT 0
+Pages: 1
+
+PAGE 0
+Title: Microsoft Teams
+URL: https://teams.live.com/v2/#deepLink=core&_=31358&clientId=cfb637a9-c12d-480d-bf1c-3fca2c02558e
+Frames: 1
+
+  FRAME 0
+  Name: 
+  URL: https://teams.live.com/v2/#deepLink=core&_=31358&clientId=cfb637a9-c12d-480d-bf1c-3fca2c02558e
+  Body preview:
+
+  Exact editor ID count: 0
+  Textarea count: 0
+  Contenteditable count: 0
