@@ -4,16 +4,17 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
-using CopilotCodingAssistant.Models;
 using CopilotCodingAssistant.Configuration;
-
+using CopilotCodingAssistant.Copilot;
+using CopilotCodingAssistant.Models;
 
 var settings = AppSettings.Load();
 
 var CopilotUrl = settings.CopilotUrl;
 var RequiredAccount = settings.AccountEmail;
-var RequiredModelMenuText = settings.PreferredModel;
-var ProfileFolderName = settings.ProfileFolderName;
+var PreferredModel = settings.PreferredModel;
+var ProfileFolderName =
+    settings.ProfileFolderName;
 
 var profilePath = Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -104,7 +105,9 @@ async Task RunPromptPipelineAsync(
     Console.WriteLine("IITK account ready.");
 
     await StartNewChatIfAvailableAsync(page);
-    await SelectRequiredModelAsync(page);
+await SelectRequiredModelAsync(
+    page,
+    PreferredModel);
 
     var editor = await FindChatEditorAsync(page);
     var responseCountBefore = await CountCopyResponseButtonsAsync(page);
@@ -134,7 +137,10 @@ async Task RunPromptPipelineAsync(
 
     Console.WriteLine("Generation completed. Extracting the newest response...");
 
-    var result = await ExtractLatestResponseAsync(page);
+var result =
+    await ExtractLatestResponseAsync(
+        page,
+        PreferredModel);
 
     if (string.IsNullOrWhiteSpace(result.FullText))
         throw new InvalidOperationException("The newest response container was found, but its text was empty.");
@@ -349,16 +355,18 @@ async Task StartNewChatIfAvailableAsync(IPage page)
     }
 }
 
-async Task SelectRequiredModelAsync(IPage page)
+async Task SelectRequiredModelAsync(
+    IPage page,
+    CopilotModel preferredModel)
 {
-    const string topSelectorCss = "#gptModeSwitcher";
-    const string gptTriggerCss =
-        "[data-test-id='gptSubMenuModelTrigger-OpenAI']";
-    const string thinkModelCss =
-        "div[role='menuitemradio']:has(" +
-        "svg[data-testid='checkmark-Gpt_5_6_Reasoning'])";
+    var expectedTopText =
+        preferredModel.ToTopSelectorText();
 
-    var topSelector = page.Locator(topSelectorCss);
+    var requestedName =
+        preferredModel.ToMenuText();
+
+    var topSelector = page.Locator(
+        CopilotSelectors.ModelSelector);
 
     await topSelector.WaitForAsync(
         new LocatorWaitForOptions
@@ -370,29 +378,92 @@ async Task SelectRequiredModelAsync(IPage page)
     var currentModel = NormalizeEditorText(
         await topSelector.InnerTextAsync());
 
-    Console.WriteLine($"Model before selection: {currentModel}");
+    Console.WriteLine(
+        $"Current model: {currentModel}");
 
     if (currentModel.Contains(
-            "GPT 5.6 Think",
+            expectedTopText,
             StringComparison.OrdinalIgnoreCase))
     {
-        Console.WriteLine("Model already selected: GPT 5.6 Think deeper.");
+        Console.WriteLine(
+            $"Requested model already selected: " +
+            $"{requestedName}");
+
         return;
     }
 
-    if (!currentModel.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+    await topSelector.ClickAsync();
+
+    if (preferredModel.UsesGptSubmenu())
     {
-        throw new InvalidOperationException(
-            $"Unexpected text in #gptModeSwitcher: '{currentModel}'.");
+        await SelectGptModelAsync(
+            page,
+            preferredModel);
+    }
+    else
+    {
+        await SelectDirectModeAsync(
+            page,
+            preferredModel);
     }
 
-    await topSelector.ClickAsync(
-        new LocatorClickOptions
+    await WaitForModelSelectorTextAsync(
+        page,
+        expectedTopText,
+        TimeSpan.FromSeconds(20));
+
+    Console.WriteLine(
+        $"Requested model selected: {requestedName}");
+}
+
+async Task SelectDirectModeAsync(
+    IPage page,
+    CopilotModel model)
+{
+    var selector = model switch
+    {
+        CopilotModel.Auto =>
+            CopilotSelectors.AutoModel,
+
+        CopilotModel.QuickResponse =>
+            CopilotSelectors.QuickResponseModel,
+
+        CopilotModel.ThinkDeeper =>
+            CopilotSelectors.ThinkDeeperModel,
+
+        _ => throw new ArgumentException(
+            $"Model '{model}' is not a direct mode.",
+            nameof(model))
+    };
+
+    var modelItem = page.Locator(selector);
+
+    await modelItem.WaitForAsync(
+        new LocatorWaitForOptions
         {
+            State = WaitForSelectorState.Visible,
             Timeout = 15000
         });
 
-    var gptTrigger = page.Locator(gptTriggerCss);
+    var displayedText = NormalizeEditorText(
+        await modelItem.InnerTextAsync());
+
+    Console.WriteLine(
+        $"Selecting direct mode: {displayedText}");
+
+    await modelItem.ClickAsync(
+        new LocatorClickOptions
+        {
+            Timeout = 15000,
+            Force = true
+        });
+}
+async Task SelectGptModelAsync(
+    IPage page,
+    CopilotModel model)
+{
+    var gptTrigger = page.Locator(
+        CopilotSelectors.GptSubmenuTrigger);
 
     await gptTrigger.WaitForAsync(
         new LocatorWaitForOptions
@@ -401,15 +472,15 @@ async Task SelectRequiredModelAsync(IPage page)
             Timeout = 15000
         });
 
-    var thinkModel = page.Locator(thinkModelCss);
-    var submenuOpened = false;
+    ILocator? requestedItem = null;
 
-    // A single synthetic click was occasionally acknowledged visually without
-    // opening the submenu. Retry the exact stable GPT trigger until the exact
-    // concrete model item actually becomes visible.
-    for (var attempt = 1; attempt <= 3; attempt++)
+    for (var attempt = 1;
+         attempt <= 3;
+         attempt++)
     {
-        Console.WriteLine($"Opening GPT submenu, attempt {attempt}...");
+        Console.WriteLine(
+            $"Opening GPT submenu, " +
+            $"attempt {attempt}...");
 
         await gptTrigger.ClickAsync(
             new LocatorClickOptions
@@ -418,178 +489,251 @@ async Task SelectRequiredModelAsync(IPage page)
                 Force = true
             });
 
-        var deadline = DateTime.UtcNow.AddSeconds(3);
-
-        while (DateTime.UtcNow < deadline)
+        if (model ==
+            CopilotModel.Gpt56ThinkDeeper)
         {
-            if (await thinkModel.CountAsync() > 0 &&
-                await thinkModel.IsVisibleAsync())
+            var knownItem = page.Locator(
+                CopilotSelectors.Gpt56ThinkModel);
+
+            if (await WaitUntilVisibleAsync(
+                    knownItem,
+                    TimeSpan.FromSeconds(3)))
             {
-                submenuOpened = true;
+                requestedItem = knownItem;
                 break;
             }
-
-            await Task.Delay(100);
         }
+        else
+        {
+            var accessibleItem = page.GetByRole(
+                AriaRole.Menuitemradio,
+                new PageGetByRoleOptions
+                {
+                    Name = model.ToMenuText(),
+                    Exact = true
+                });
 
-        if (submenuOpened)
-            break;
+            if (await WaitUntilVisibleAsync(
+                    accessibleItem,
+                    TimeSpan.FromSeconds(3)))
+            {
+                requestedItem = accessibleItem;
+                break;
+            }
+        }
     }
 
-    if (!submenuOpened)
+    if (requestedItem is null)
     {
-        await SaveModelSelectionDiagnosticsAsync(page);
         throw new InvalidOperationException(
-            "The GPT submenu did not expose GPT 5.6 Think deeper after " +
-            "three clicks. The prompt was not entered or sent.");
+            $"The GPT submenu did not expose " +
+            $"'{model.ToMenuText()}'.");
     }
 
-    var optionText = NormalizeEditorText(
-        await thinkModel.InnerTextAsync());
+    var itemText = NormalizeEditorText(
+        await requestedItem.InnerTextAsync());
 
-    if (!optionText.Equals(
-            RequiredModelMenuText,
-            StringComparison.OrdinalIgnoreCase))
-    {
-        throw new InvalidOperationException(
-            $"Unexpected submenu item text: '{optionText}'.");
-    }
+    Console.WriteLine(
+        $"Selecting GPT model: {itemText}");
 
-    Console.WriteLine("Selecting GPT 5.6 Think deeper...");
-
-    await thinkModel.ClickAsync(
+    await requestedItem.ClickAsync(
         new LocatorClickOptions
         {
             Timeout = 15000,
             Force = true
         });
+}
 
-    // Verify only the exact stable top button supplied by the page HTML.
-    // The pipeline cannot continue while this button still says Auto.
-    var selectionDeadline = DateTime.UtcNow.AddSeconds(20);
-    string selectedText = string.Empty;
+async Task<bool> WaitUntilVisibleAsync(
+    ILocator locator,
+    TimeSpan timeout)
+{
+    var deadline = DateTime.UtcNow.Add(timeout);
 
-    while (DateTime.UtcNow < selectionDeadline)
+    while (DateTime.UtcNow < deadline)
     {
-        selectedText = NormalizeEditorText(
+        if (await locator.CountAsync() > 0 &&
+            await locator.IsVisibleAsync())
+        {
+            return true;
+        }
+
+        await Task.Delay(100);
+    }
+
+    return false;
+}
+
+async Task WaitForModelSelectorTextAsync(
+    IPage page,
+    string expectedText,
+    TimeSpan timeout)
+{
+    var topSelector = page.Locator(
+        CopilotSelectors.ModelSelector);
+
+    var deadline = DateTime.UtcNow.Add(timeout);
+    var lastText = string.Empty;
+
+    while (DateTime.UtcNow < deadline)
+    {
+        lastText = NormalizeEditorText(
             await topSelector.InnerTextAsync());
 
-        if (selectedText.Contains(
-                "GPT 5.6 Think",
+        if (lastText.Contains(
+                expectedText,
                 StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine(
-                $"Model selected and verified through #gptModeSwitcher: " +
-                $"{selectedText}");
+                $"Model selected and verified: " +
+                $"{lastText}");
+
             return;
         }
 
         await Task.Delay(100);
     }
 
-    await SaveModelSelectionDiagnosticsAsync(page);
+    throw new InvalidOperationException(
+        $"MODEL_SELECTION_FAILED: expected " +
+        $"'{expectedText}', but " +
+        $"#gptModeSwitcher displayed '{lastText}'. " +
+        "The prompt was not entered or sent.");
+}
+
+async Task<ILocator> FindChatEditorAsync(
+    IPage page)
+{
+    var editor = page.Locator(
+        CopilotSelectors.ChatEditor);
+
+    await editor.WaitForAsync(
+        new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 30000
+        });
+
+    return editor;
+}
+async Task SubmitPromptAsync(
+    IPage page,
+    ILocator editor)
+{
+    var sendButton = page.Locator(
+        CopilotSelectors.SendButton);
+
+    await sendButton.WaitForAsync(
+        new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+    var readyDeadline =
+        DateTime.UtcNow.AddSeconds(15);
+
+    while (DateTime.UtcNow < readyDeadline)
+    {
+        var editorText = NormalizeEditorText(
+            await ReadEditorTextAsync(editor));
+
+        var sendEnabled =
+            await sendButton.IsEnabledAsync();
+
+        if (!string.IsNullOrWhiteSpace(editorText) &&
+            sendEnabled)
+        {
+            break;
+        }
+
+        await Task.Delay(100);
+    }
+
+    var finalEditorText = NormalizeEditorText(
+        await ReadEditorTextAsync(editor));
+
+    if (string.IsNullOrWhiteSpace(finalEditorText))
+    {
+        throw new InvalidOperationException(
+            "The editor became empty before submission.");
+    }
+
+    if (!await sendButton.IsEnabledAsync())
+    {
+        throw new InvalidOperationException(
+            "The Send button did not become enabled.");
+    }
+
+    Console.WriteLine(
+        "Composer is ready and Send is enabled.");
+
+    for (var attempt = 1; attempt <= 2; attempt++)
+    {
+        Console.WriteLine(
+            $"Clicking Send, attempt {attempt}...");
+
+        await sendButton.ClickAsync(
+            new LocatorClickOptions
+            {
+                Timeout = 15000
+            });
+
+        var accepted = await WaitForEditorToClearAsync(
+            editor,
+            TimeSpan.FromSeconds(5));
+
+        if (accepted)
+        {
+            Console.WriteLine(
+                "Prompt submission verified: " +
+                "the editor was cleared.");
+
+            return;
+        }
+
+        if (attempt < 2)
+        {
+            Console.WriteLine(
+                "Prompt remained in the editor. " +
+                "Retrying Send once...");
+
+            await Task.Delay(500);
+        }
+    }
 
     throw new InvalidOperationException(
-        $"MODEL_SELECTION_FAILED: #gptModeSwitcher still displayed " +
-        $"'{selectedText}'. The prompt was not entered or sent.");
+        "PROMPT_SUBMISSION_FAILED: Send was clicked " +
+        "twice, but the prompt remained in the editor.");
 }
 
-async Task SaveModelSelectionDiagnosticsAsync(IPage page)
+async Task<bool> WaitForEditorToClearAsync(
+    ILocator editor,
+    TimeSpan timeout)
 {
-    const string topSelectorCss = "#gptModeSwitcher";
-    const string gptTriggerCss =
-        "[data-test-id='gptSubMenuModelTrigger-OpenAI']";
-    const string thinkModelCss =
-        "div[role='menuitemradio']:has(" +
-        "svg[data-testid='checkmark-Gpt_5_6_Reasoning'])";
+    var deadline = DateTime.UtcNow.Add(timeout);
 
-    var lines = new List<string>
+    while (DateTime.UtcNow < deadline)
     {
-        $"URL: {page.Url}"
-    };
-
-    var topSelector = page.Locator(topSelectorCss);
-    lines.Add($"Top selector count: {await topSelector.CountAsync()}");
-
-    if (await topSelector.CountAsync() > 0)
-    {
-        lines.Add(
-            $"Top selector text: " +
-            NormalizeEditorText(await topSelector.InnerTextAsync()));
-        lines.Add(
-            $"Top selector expanded: " +
-            await topSelector.GetAttributeAsync("aria-expanded"));
-    }
-
-    var gptTrigger = page.Locator(gptTriggerCss);
-    lines.Add($"GPT trigger count: {await gptTrigger.CountAsync()}");
-
-    if (await gptTrigger.CountAsync() > 0)
-    {
-        lines.Add(
-            $"GPT trigger visible: {await gptTrigger.IsVisibleAsync()}");
-        lines.Add(
-            $"GPT trigger expanded: " +
-            await gptTrigger.GetAttributeAsync("aria-expanded"));
-    }
-
-    var thinkModel = page.Locator(thinkModelCss);
-    lines.Add($"Think model count: {await thinkModel.CountAsync()}");
-
-    if (await thinkModel.CountAsync() > 0)
-    {
-        lines.Add(
-            $"Think model visible: {await thinkModel.IsVisibleAsync()}");
-        lines.Add(
-            $"Think model checked: " +
-            await thinkModel.GetAttributeAsync("aria-checked"));
-        lines.Add(
-            $"Think model text: " +
-            NormalizeEditorText(await thinkModel.InnerTextAsync()));
-    }
-
-    await File.WriteAllLinesAsync(
-        "model-selection-debug.txt",
-        lines,
-        Encoding.UTF8);
-
-    await page.ScreenshotAsync(
-        new PageScreenshotOptions
+        try
         {
-            Path = "model-selection-debug.png",
-            FullPage = true
-        });
-}
+            var editorText = NormalizeEditorText(
+                await ReadEditorTextAsync(editor));
 
-async Task<ILocator> FindChatEditorAsync(IPage page)
-{
-    var namedTextbox = page.GetByRole(
-        AriaRole.Textbox,
-        new PageGetByRoleOptions
+            if (string.IsNullOrWhiteSpace(editorText))
+                return true;
+        }
+        catch (PlaywrightException)
         {
-            NameRegex = new Regex(
-                "message copilot",
-                RegexOptions.IgnoreCase)
-        });
+            // A brief editor rerender during submission
+            // does not necessarily mean submission failed.
+        }
 
-    if (await namedTextbox.CountAsync() > 0)
-        return namedTextbox.First;
+        await Task.Delay(100);
+    }
 
-    var editable = page.Locator("[contenteditable='true']");
-
-    if (await editable.CountAsync() > 0)
-        return editable.Last;
-
-    throw new InvalidOperationException("The Message Copilot editor was not found.");
+    return false;
 }
-
-async Task SubmitPromptAsync(IPage page, ILocator editor)
-{
-    // Press Enter on the exact editor. This is a DOM-level Playwright action,
-    // not a physical keyboard event, and avoids selecting an unrelated button.
-    await editor.PressAsync("Enter");
-}
-
 async Task WaitForGenerationAsync(
     IPage page,
     int responseCountBefore,
@@ -664,7 +808,7 @@ async Task<int> CountCopyResponseButtonsAsync(IPage page)
         .CountAsync();
 }
 
-async Task<CopilotResult> ExtractLatestResponseAsync(IPage page)
+async Task<CopilotResult> ExtractLatestResponseAsync( IPage page, CopilotModel selectedModel)
 {
     var copyButtons = page.GetByRole(
         AriaRole.Button,
@@ -777,7 +921,7 @@ async Task<CopilotResult> ExtractLatestResponseAsync(IPage page)
     }
 
     return new CopilotResult(
-        Model: "GPT 5.6 Think deeper",
+        Model: selectedModel.ToMenuText(),
         FullText: cleaned,
         CodeBlocks: codeBlocks,
         CapturedAtUtc: DateTime.UtcNow);

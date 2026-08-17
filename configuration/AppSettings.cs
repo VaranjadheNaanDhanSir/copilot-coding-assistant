@@ -1,5 +1,7 @@
 // Sri Rama Jayam
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using CopilotCodingAssistant.Models;
 
 namespace CopilotCodingAssistant.Configuration;
 
@@ -11,8 +13,8 @@ public sealed class AppSettings
     public string AccountEmail { get; init; } =
         string.Empty;
 
-    public string PreferredModel { get; init; } =
-        "GPT 5.6 Think deeper";
+    public CopilotModel PreferredModel { get; init; } =
+        CopilotModel.Gpt56ThinkDeeper;
 
     public string ProfileFolderName { get; init; } =
         "CopilotWebsiteAutomation";
@@ -27,25 +29,41 @@ public sealed class AppSettings
                 "Create it using appsettings.example.json.");
         }
 
-        var json = File.ReadAllText(path);
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        };
 
-        var settings =
-            JsonSerializer.Deserialize<AppSettings>(
-                json,
-                new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
+        options.Converters.Add(
+            new JsonStringEnumConverter());
 
-        if (settings is null)
+        try
+        {
+            var json = File.ReadAllText(path);
+
+            var settings =
+                JsonSerializer.Deserialize<AppSettings>(
+                    json,
+                    options);
+
+            if (settings is null)
+            {
+                throw new InvalidOperationException(
+                    $"Configuration file '{path}' is empty " +
+                    "or invalid.");
+            }
+
+            settings.Validate();
+
+            return settings;
+        }
+        catch (JsonException exception)
         {
             throw new InvalidOperationException(
-                $"Configuration file '{path}' is invalid.");
+                "appsettings.local.json contains an " +
+                "invalid property or preferredModel value.",
+                exception);
         }
-
-        settings.Validate();
-
-        return settings;
     }
 
     private void Validate()
@@ -66,9 +84,18 @@ public sealed class AppSettings
                 "CopilotUrl must be a valid HTTPS URL.");
         }
 
-        if (string.IsNullOrWhiteSpace(PreferredModel))
+        if (!Enum.IsDefined(PreferredModel))
         {
             throw new InvalidOperationException(
-                "PreferredModel cannot be empty.");
+                $"Unsupported preferred model: " +
+                $"{PreferredModel}.");
         }
 
+        if (string.IsNullOrWhiteSpace(
+                ProfileFolderName))
+        {
+            throw new InvalidOperationException(
+                "ProfileFolderName cannot be empty.");
+        }
+    }
+}
